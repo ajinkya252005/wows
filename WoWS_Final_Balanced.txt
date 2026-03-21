@@ -1,0 +1,755 @@
+
+VENTURERS MARKET PLATFORM
+A Practical Build-and-Run Blueprint
+Minimal  ·  Reliable  ·  Executable in 4 Weeks
+
+Document Status
+Final — Synthesised from first principles
+Audience
+Small dev team  ·  Event admin operators
+Platform
+VENTURERS EDC  ·  Annual Flagship Event
+Infrastructure
+Zero cost  ·  Supabase  ·  Render  ·  Vercel
+Build Timeline
+4 weeks  ·  2–3 developers
+Event Duration
+4 hours  ·  100–150 participants
+Version
+Balanced MVP — Final
+
+This document supersedes all prior versions. It is the single reference for design, build, and operation.
+
+Table of Contents
+
+1.  The Platform in Context	
+2.  The Four Things That Must Work	
+3.  Architecture	
+3.1  The Stack	
+3.2  How It All Connects	
+
+4.  Database Schema	
+4.1  The Six Tables	
+4.2  The One Query That Must Be Correct	
+
+5.  The Backend	
+5.1  API Routes	
+5.2  Price Engine	
+5.3  Trade Execution	
+5.4  Session Strategy	
+
+6.  Real-Time Layer	
+6.1  Socket.IO Setup	
+6.2  Price Broadcast	
+6.3  Event Broadcasts	
+
+7.  Frontend	
+7.1  Application Screens	
+7.2  Participant Dashboard	
+7.3  Admin Panel	
+7.4  Public Display	
+
+8.  Build Plan	
+8.1  Week 1: Core Trading	
+8.2  Week 2: Real-Time & UI	
+8.3  Week 3: Admin Panel & Deploy	
+8.4  Week 4: Rehearsal & Buffer	
+
+9.  Zero-Cost Deployment	
+10.  Event Day Operations	
+11.  Non-Obvious Improvements	
+Appendix A.  Sample Stock Universe	
+Appendix B.  Round Playbook	
+
+Open in Microsoft Word or LibreOffice and press Ctrl+A then F9 to update page numbers.
+
+1. The Platform in Context
+This is a stock market simulation for a college event. It runs for roughly four hours. About 100 to 150 students participate, trading virtual shares across seven rounds while reacting to news events injected by an admin team. The platform exists to create the experience — drama, strategy, learning — not to model financial markets with academic precision.
+That context should drive every decision. The platform that needs to survive years of production load, regulatory scrutiny, and distributed teams is a different system entirely. This one needs to start reliably, stay up for four hours, and be operable by a small admin team who are simultaneously hosting an event. Any complexity beyond that is a liability, not an asset.
+
+The Guiding Question
+Before adding anything to this system, ask: does the event break without it? If the answer is no, leave it out. The event breaks if trading stops. It does not break if the price engine lacks GARCH volatility clustering.
+
+The previous outputs on this platform explored two extremes: an over-engineered distributed system with Redis, BullMQ, Cholesky decompositions, and Grafana dashboards; and an aggressively stripped-down sketch that left out things that genuinely matter. Neither is right. This document synthesises both into a system that is minimal but not naive — one that eliminates real complexity while preserving real reliability.
+What was correctly eliminated: Redis, BullMQ, Docker, distributed locks, PgBouncer, Next.js App Router, uWebSockets, Prometheus, Grafana, monorepo tooling, saga patterns, Cholesky sector correlation, GARCH volatility, and the 14-layer trade execution flow. These add weeks of build time and operational complexity that serve a system operating at a scale this event will never reach.
+What was incorrectly eliminated: Proper session persistence so a server restart does not log out 150 participants mid-event, a bounded price engine so stocks do not drift to zero, a database-level race condition guard on the last share, and a one-click emergency halt for the admin. These are not over-engineering. They are the difference between an event that runs smoothly and one that requires emergency intervention.
+
+2. The Four Things That Must Work
+Everything else in this document exists to make these four things reliable. If any of them fails during the event, the event fails. If all four work, the event works regardless of what optional features are missing.
+
+#
+Feature
+What It Means
+Why It Cannot Be Optional
+1
+Live Trading
+Participants buy and sell stocks. Prices update every 10 seconds for everyone simultaneously. Portfolio value is always visible.
+This is the event. Without it, nothing else matters.
+2
+Admin Event Control
+One screen to start/end rounds, trigger news events with price impacts, and broadcast announcements to all participants instantly.
+The admin drives the narrative. Without reliable control, the event cannot be run.
+3
+Live Leaderboard
+Correct portfolio values computed every tick. Revealed when the admin chooses. Shown on a public display screen.
+The competition has no conclusion without an accurate, trustworthy result.
+4
+Round Structure
+Seven named rounds with open/closed trading states. A news feed that updates in real time when the admin fires an event.
+Participants need to know what round they are in and what is happening in the market.
+
+Everything else — IPO rounds, insider desk, panic sell, voting mechanics, leaked intelligence — layers on top of this core. Build the core first. If time remains after the core is stable and rehearsed, add mechanics in order of impact. If time does not remain, the event still runs cleanly.
+
+On Optional Mechanics
+Rounds 4, 5, and 6 in the playbook rely on mechanics beyond the core. Plan for the scenario where those mechanics are not ready. The free broadcast control (Section 7.3) replaces all of them: any narrative event can be delivered as plain text. Every round in the playbook can be run with only the core four features.
+
+3. Architecture
+Three boxes. One server. No infrastructure complexity. This is not a simplification that introduces hidden risk — it is the correct architecture for the scale and duration of this event.
+
+3.1 The Stack
+Layer
+Choice
+Rationale
+Backend runtime
+Node.js 20 LTS + Express 4
+Universally known. Zero configuration. Deploys anywhere. Any developer can read the code and understand it in minutes.
+Real-time
+Socket.IO v4
+Auto-reconnect and polling fallback are genuine advantages on college WiFi where WebSocket upgrades sometimes fail silently. The bundle size is irrelevant for a four-hour event.
+Database
+PostgreSQL via Supabase
+Free tier, managed, no setup. The web dashboard is your emergency SQL console. Auto-backups included.
+ORM
+Prisma 5
+One schema file. One command to deploy it. The minor performance overhead is imperceptible at this scale.
+Frontend
+React 18 + Vite
+Fast builds. Familiar. No SSR complexity to debug under time pressure.
+Charts
+TradingView Lightweight Charts v4
+Best in class, MIT licensed, 45KB, 10 lines to integrate. Use a line chart from a client-side ring buffer of the last 60 price ticks. No price history table needed.
+Auth
+express-session + connect-pg-simple + bcrypt
+Sessions stored in PostgreSQL. Server restarts do not log out participants. This is the single most important reliability decision in the entire stack.
+Deployment
+Render.com (server) + Vercel (frontend)
+Both free tier. Push to deploy. TLS handled automatically. No DevOps, no SSH, no certificates to manage.
+
+3.2 How It All Connects
+  Student Browser                    Admin Browser
+       |                                  |
+       |  HTTPS + Socket.IO               |  HTTPS + Socket.IO
+       +----------------------------------+
+                        |
+                        v
+        +-------------------------------+
+        |  Node.js + Express            |
+        |  REST API (trades, auth)      |
+        |  Socket.IO server             |
+        |  Price engine (setInterval)   |
+        +---------------+---------------+
+                        |
+                        v
+         +-----------------------------+
+         |  PostgreSQL (Supabase)      |
+         |  Sessions stored here       |
+         +-----------------------------+
+
+The price engine is a setInterval inside the main process. It runs every 10 seconds, updates prices in the database and in an in-memory map, and emits a single Socket.IO broadcast. There is no separate process, no message queue, and no pub/sub infrastructure. If the server restarts, the price engine re-seeds the in-memory map from the database on startup. The gap is at most 10 seconds.
+One intentional omission: Redis. Sessions live in PostgreSQL via connect-pg-simple. Live prices live in a JavaScript object in memory, updated by the price engine. This object is the authoritative price source for all trade executions. No Redis lock is needed because Node.js is single-threaded — one async function runs at a time. The database transaction handles concurrent correctness.
+
+4. Database Schema
+4.1 The Six Tables
+Everything the platform needs lives in six tables. There is no audit log, no price history, no participant metrics. Add these only if time permits after the core is working and tested.
+
+users
+  id            SERIAL PRIMARY KEY
+  username      VARCHAR(50) UNIQUE NOT NULL
+  password_hash VARCHAR(255) NOT NULL
+  display_name  VARCHAR(100) NOT NULL
+  role          VARCHAR(20) DEFAULT 'participant'  -- participant | admin
+  cash_balance  DECIMAL(14,2) DEFAULT 500000
+  loan_balance  DECIMAL(14,2) DEFAULT 0
+  is_active     BOOLEAN DEFAULT true
+
+stocks
+  id              SERIAL PRIMARY KEY
+  ticker          VARCHAR(8) UNIQUE NOT NULL
+  company_name    VARCHAR(100) NOT NULL
+  sector          VARCHAR(50) NOT NULL
+  current_price   DECIMAL(12,2) NOT NULL
+  base_price      DECIMAL(12,2) NOT NULL   -- for floor/ceiling enforcement
+  available_supply INTEGER NOT NULL
+  volatility_pct  DECIMAL(5,2) DEFAULT 5   -- max % move per tick
+  is_tradeable    BOOLEAN DEFAULT false     -- admin toggles per round
+
+holdings
+  user_id         INTEGER REFERENCES users(id)
+  stock_id        INTEGER REFERENCES stocks(id)
+  quantity        INTEGER NOT NULL DEFAULT 0
+  avg_buy_price   DECIMAL(12,2)
+  PRIMARY KEY (user_id, stock_id)
+
+trades
+  id              SERIAL PRIMARY KEY
+  user_id         INTEGER REFERENCES users(id)
+  stock_id        INTEGER REFERENCES stocks(id)
+  side            VARCHAR(4) NOT NULL   -- BUY | SELL
+  quantity        INTEGER NOT NULL
+  price           DECIMAL(12,2) NOT NULL
+  fee             DECIMAL(10,2) DEFAULT 0
+  executed_at     TIMESTAMP DEFAULT NOW()
+
+rounds
+  id              SERIAL PRIMARY KEY
+  number          INTEGER NOT NULL
+  name            VARCHAR(100) NOT NULL
+  status          VARCHAR(20) DEFAULT 'pending'  -- pending | active | ended
+  started_at      TIMESTAMP
+  ended_at        TIMESTAMP
+
+news_events
+  id              SERIAL PRIMARY KEY
+  round_id        INTEGER REFERENCES rounds(id)
+  headline        VARCHAR(255) NOT NULL
+  detail          TEXT
+  triggered_at    TIMESTAMP DEFAULT NOW()
+
+
+Optional: price_history
+Add a price_history table (stock_id, price, recorded_at) only if you want TradingView candlestick charts. The line chart built from a client-side ring buffer of the last 60 Socket.IO price updates is simpler and works well. If you do add price history, write to it every 5 ticks as a background insert — never on the hot path.
+
+4.2 The One Query That Must Be Correct
+Every other query is straightforward. This one is not. The trade execution must use a serializable transaction with a row-level lock to handle the case where two participants simultaneously buy the last available share. This is not over-engineering — it is the minimum correct implementation.
+-- Buy order inside a single serializable transaction
+BEGIN;
+
+SELECT available_supply, current_price
+FROM stocks WHERE id = $stockId
+FOR UPDATE;
+-- This lock prevents any other transaction from reading or writing
+-- the supply until this transaction commits or rolls back.
+
+-- All validation happens inside the lock:
+--   available_supply >= quantity
+--   user.cash_balance >= total_cost
+--   stock.is_tradeable = true
+--   round.status = active
+
+UPDATE stocks SET available_supply = available_supply - $qty  WHERE id = $stockId;
+UPDATE users  SET cash_balance     = cash_balance - $cost    WHERE id = $userId;
+INSERT INTO trades (user_id, stock_id, side, quantity, price, fee) VALUES (...);
+INSERT INTO holdings (user_id, stock_id, quantity, avg_buy_price)
+  VALUES ($userId, $stockId, $qty, $price)
+  ON CONFLICT (user_id, stock_id)
+  DO UPDATE SET
+    quantity      = holdings.quantity + $qty,
+    avg_buy_price = (holdings.quantity * holdings.avg_buy_price + $qty * $price)
+                    / (holdings.quantity + $qty);
+COMMIT;
+
+With FOR UPDATE on the stock row, the second concurrent buyer waits until the first transaction commits, then re-reads the now-reduced supply. If it is zero, the transaction fails cleanly with an insufficient supply error. No Redis locks, no distributed coordination — just a database doing what databases are built to do.
+
+5. The Backend
+5.1 API Routes
+Route
+Auth
+Purpose
+POST /auth/login
+None
+Validate credentials, set session cookie. Returns user object.
+POST /auth/logout
+Any
+Destroy session.
+GET /api/me
+Any
+Returns session user with cash balance and role.
+GET /api/stocks
+Participant
+All stocks with current prices from the in-memory map.
+GET /api/portfolio
+Participant
+Holdings, cash, loan balance, computed portfolio value.
+POST /api/trade/buy
+Participant
+Execute buy inside serializable transaction.
+POST /api/trade/sell
+Participant
+Execute sell inside serializable transaction.
+GET /api/leaderboard
+Conditional
+Returns ranked participants. Hidden until admin reveals.
+POST /api/admin/round/start
+Admin
+Sets round active, all stocks tradeable, emits round_status.
+POST /api/admin/round/end
+Admin
+Sets round ended, all stocks not tradeable, emits round_status.
+POST /api/admin/news
+Admin
+Inserts news event, applies price impacts, emits to all clients.
+POST /api/admin/shock
+Admin
+Directly adjusts one stock price by a given percentage.
+POST /api/admin/broadcast
+Admin
+Sends plain text to all participants. No price effect.
+POST /api/admin/leaderboard/reveal
+Admin
+Flips leaderboard visibility flag. Shows preview first.
+POST /api/admin/halt
+Admin
+Sets all stocks not tradeable instantly. Requires "HALT" confirmation.
+GET /api/admin/participants
+Admin
+All participants with live portfolio values for the monitor.
+POST /api/admin/users/import
+Admin
+Bulk import participants from CSV. Hashes passwords.
+
+5.2 Price Engine
+Simple, bounded, and adequate. The engine moves each tradeable stock by a small random amount within its volatility band every 10 seconds. A soft mean-reversion nudge prevents long-run drift without any parameter calibration. Hard floor and ceiling limits mean prices can never collapse or explode regardless of what events the admin triggers.
+const livePrices = {};  // seeded on startup from DB
+
+async function priceTick() {
+  const stocks = await prisma.stock.findMany({ where: { is_tradeable: true } });
+  for (const stock of stocks) {
+    const band  = stock.volatility_pct / 100;
+    const noise = (Math.random() * 2 - 1) * band;
+
+    // Soft mean-reversion: gentle pull toward base_price if drifted > 60%
+    const drift = (stock.current_price - stock.base_price) / stock.base_price;
+    const pull  = Math.abs(drift) > 0.6 ? -drift * 0.05 : 0;
+
+    const raw      = stock.current_price * (1 + noise + pull);
+    const floor    = stock.base_price * 0.20;   // never below 20% of base
+    const ceiling  = stock.base_price * 6.00;   // never above 600% of base
+    const newPrice = Math.max(floor, Math.min(ceiling, raw));
+
+    livePrices[stock.ticker] = newPrice;
+    await prisma.stock.update({
+      where: { id: stock.id }, data: { current_price: newPrice }
+    });
+  }
+  io.emit('price_update', livePrices);  // one object, all tickers
+}
+
+setInterval(priceTick, 10_000);
+
+The hard floor and ceiling eliminate the need for pre-event calibration. The soft mean-reversion handles slow drift across seven rounds. The engine is 20 lines of code and requires no tuning.
+
+5.3 Trade Execution
+The trade handler validates the request shape, checks round state from the in-memory round object, then runs the database transaction from Section 4.2. On success, it emits a portfolio_update to the participant's private Socket.IO room. It also increments a demand signal (a simple buy/sell count per ticker) that the price engine reads on the next tick to add a small directional nudge.
+
+5.4 Session Strategy
+Sessions are stored in PostgreSQL using connect-pg-simple. This is five lines of setup and the single most important reliability decision in the stack. In-memory sessions vanish when the server restarts. With database-backed sessions, all 150 participants stay logged in through any restart, deployment, or crash recovery. On an event where even one unplanned restart is disruptive, this matters.
+const session   = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
+
+app.use(session({
+  store:             new pgSession({ conString: process.env.DATABASE_URL }),
+  secret:            process.env.SESSION_SECRET,
+  resave:            false,
+  saveUninitialized: false,
+  cookie:            { maxAge: 8 * 60 * 60 * 1000 }  // 8 hours
+}));
+
+
+6. Real-Time Layer
+6.1 Socket.IO Setup
+Three rooms cover every communication pattern. No custom namespace logic, no complex room management.
+io.on('connection', (socket) => {
+  const user = socket.request.session?.user;
+  if (!user) { socket.disconnect(); return; }
+
+  socket.join(`user:${user.id}`);  // private: portfolio updates
+  socket.join('global');           // broadcast: prices, news, round status
+  if (user.role === 'admin') socket.join('admin');
+
+  // State sync on every connection -- this IS the reconnection strategy
+  socket.emit('state_sync', {
+    prices:             livePrices,
+    round:              currentRound,
+    leaderboardVisible: leaderboardRevealed,
+  });
+});
+
+
+Reconnection is automatic
+The state_sync emit fires on every connection, not just the first. When a participant's browser reconnects after a WiFi hiccup, they immediately receive current prices, round status, and leaderboard visibility. No reconnection-specific code path is needed.
+
+6.2 Price Broadcast
+Prices are broadcast as a single flat object: { VNTCH: 482.5, VNDFN: 315.0, ... }. The client replaces its entire local price map on every tick. This eliminates stale state bugs and makes portfolio value calculation trivial: iterate holdings and multiply by livePrices[ticker]. When a new IPO stock is added mid-event, the broadcast automatically includes it.
+
+6.3 Event Broadcasts
+When the admin triggers a news event, the server does three things: inserts the news record, applies price impacts to affected stocks in both the database and the livePrices map, then emits one Socket.IO event carrying both the news item and the updated prices. Participants see the headline appear and prices jump in the same render cycle.
+// POST /api/admin/news
+const { headline, detail, impacts } = req.body;
+// impacts: [{ ticker: 'VNTCH', magnitude: 0.15 }, ...]
+
+for (const { ticker, magnitude } of impacts) {
+  livePrices[ticker] = livePrices[ticker] * (1 + magnitude);
+  await prisma.stock.update({
+    where: { ticker }, data: { current_price: livePrices[ticker] }
+  });
+}
+
+await prisma.newsEvent.create({ data: { headline, detail, roundId } });
+
+// One emit: updated prices + the news item
+io.to('global').emit('news_event', { headline, detail, prices: livePrices });
+
+
+7. Frontend
+7.1 Application Screens
+Route
+Access
+Purpose
+/login
+Public
+Username and password. On success, redirects to /app or /admin based on role.
+/app
+Participants
+The trading terminal: stock list, chart, trade widget, portfolio, news feed.
+/admin
+Admin only
+Round controls, news trigger, shock tool, broadcast, leaderboard reveal, participant monitor.
+/display
+Public (no login)
+Projected on the big screen. Leaderboard, news ticker, round status.
+
+7.2 Participant Dashboard
+Designed around one primary action: selecting a stock and trading it in under 10 seconds without reading any instructions.
+
+Area
+Content
+Notes
+Top bar
+Round name and status, cash balance, total portfolio value, connection indicator.
+Portfolio value computed client-side: cash + sum(holdings * livePrices[ticker]). Updates every price_update event with no server request.
+Left panel
+Stock list by sector. Ticker, price, % change from last tick, colour-coded.
+% change computed client-side from previous tick price in a ref. Green = up, red = down.
+Centre
+Line chart for the selected stock built from a ring buffer of the last 60 Socket.IO price updates.
+TradingView Lightweight Charts. addLineSeries(). Update on every price_update for the selected ticker only.
+Right panel
+Trade widget: Buy/Sell toggle, quantity, estimated cost, submit. Holdings for selected stock below.
+Estimated cost updates as quantity changes. Submit calls POST /api/trade/buy or /sell. Reject error shown inline.
+Bottom
+News feed. Each news_event appends a bold headline and muted detail. Auto-scrolls to newest.
+Keep last 20 items. Discard older ones to avoid memory growth.
+Floating overlay
+Full-screen announcement for major events. Auto-dismisses in 5 seconds.
+Shown for: round start/end, leaderboard reveal, admin broadcast. Dismissable on click.
+
+7.3 Admin Panel
+A single dense page with no navigation. Every control visible at once. No modal dialogs that block the live market view. Every action completable in under 30 seconds.
+
+Control
+Design
+Round control
+Prominent Start and End buttons with the current round name and status. Start sets all stocks tradeable and emits round status. End does the reverse.
+News trigger
+Headline text field, detail text area, stock checkboxes with magnitude sliders (-30% to +30%), live preview showing estimated price movements, and a Broadcast button.
+Direct shock
+Stock dropdown, magnitude slider, and a Fire button. For quick mid-round price corrections without a formal news event.
+Free broadcast
+Plain text area and a Send button. Delivers a message to all participants with no price effect. This single control replaces leaked intel, analyst reports, board announcements, and any other narrative event that does not require price mechanics.
+Emergency halt
+One large red button labelled HALT TRADING. Requires typing HALT to confirm. Immediately sets all stocks not tradeable and sends a broadcast. Trading stops until admin resumes.
+Leaderboard reveal
+A button that flips leaderboard visibility. Shows current rankings as a preview before confirming.
+Participant monitor
+A live table: name, portfolio value, cash, trade count. Updates every 30 seconds via GET /api/admin/participants.
+
+7.4 Public Display
+A single full-screen page at /display requiring no login. Connects to Socket.IO and updates automatically. Shows: top-10 leaderboard when revealed, current round name and status, and the last five news events as a scrolling ticker at the bottom. Large text, high contrast, minimal density — readable on a projector from 5 metres.
+
+8. Build Plan
+Four weeks. The fourth week is explicitly a buffer and rehearsal week, not a development week. If the core is not complete and rehearsed by end of Week 3, the event is at risk. Treat that deadline as fixed.
+
+8.1 Week 1: Core Trading
+Goal: 
+	•	Day 1: Scaffold Express server. Write Prisma schema. Connect to Supabase. Run prisma db push. Seed 15 stocks and 10 test users with bcrypt-hashed passwords.
+	•	Day 2: Auth endpoints and session middleware with connect-pg-simple. Verify that a server restart does not destroy sessions.
+	•	Day 3: Buy and sell endpoints with the serializable transaction. Manually test: two tabs simultaneously buying the last 5 shares of one stock. Only the available quantity should be sold in total.
+	•	Day 4: Portfolio and stock list endpoints. Seed livePrices from the database on startup.
+	•	Day 5: Basic frontend. Login screen. Stock list. Trade widget calling the endpoints. Portfolio display. No real-time yet.
+
+Validation Gate - Week 1
+Admin imports a CSV of 10 participants. Each logs in. One buys 100 VNTCH shares: cash decreases, holding appears. They sell 50: cash increases. The admin sees this in the participant monitor.
+
+8.2 Week 2: Real-Time and UI
+Goal: 
+	•	Day 1: Socket.IO setup. Server rooms, state_sync on connection, client connection hook.
+	•	Day 2: Price engine with setInterval. livePrices map updated each tick. io.emit('price_update') every 10 seconds. Client updates display and recomputes portfolio value.
+	•	Day 3: Round control endpoints. Start emits round_status, stops emit round_status. Participant UI shows current round and open/closed indicator.
+	•	Day 4: News trigger and direct shock in admin. Client news feed appends items. Chart ring buffer updates on price_update.
+	•	Day 5: Polish participant dashboard. Stock list colour flashes on price change. Trade widget feels instant with optimistic UI. Chart scrolls smoothly.
+
+Validation Gate - Week 2
+Five browser tabs as participants, one as admin. Admin starts Round 1. All participant tabs show "Round 1 - Trading Open." Prices move every 10 seconds in sync. Admin triggers news: all tabs show headline, affected stocks jump simultaneously.
+
+8.3 Week 3: Admin Panel and Deploy
+Goal: 
+	•	Day 1: Complete admin panel: news trigger with preview, free broadcast, emergency halt, all controls from Section 7.3.
+	•	Day 2: Leaderboard. Computed in memory every 30 seconds. Revealed on admin command. Public display screen built.
+	•	Day 3: Deploy to Render and Vercel. Set all environment variables. Verify end-to-end on live URLs, not localhost. Set up UptimeRobot health check.
+	•	Day 4: Participant CSV import, credential sheet generation, 30-minute test on deployed URLs with the actual admin team.
+	•	Day 5: Optional mechanics if time permits. Panic Sell is highest priority (trading restriction per user, timed window). IPO second (random selection from applicants). Only implement what can be fully tested.
+
+Validation Gate - Week 3
+The admin team (not the developers) runs through all 7 rounds using only the admin panel and the one-page cheat sheet. Developers observe silently. Any action that takes over 30 seconds is a UX problem to fix.
+
+8.4 Week 4: Rehearsal and Buffer
+Goal: 
+	•	Day 1-2: Full dress rehearsal at accelerated pace if possible with real participants.
+	•	Day 3: Fix everything the rehearsal uncovered. No new features. Fix what broke.
+	•	Day 4: Final deployment check. Verify all credentials, UptimeRobot active, Supabase backup confirmed. Print the one-page admin cheat sheet.
+	•	Day 5: Buffer. If you reach this day with nothing to do, the event is ready.
+
+9. Zero-Cost Deployment
+The entire infrastructure is managed through browser dashboards. No SSH, no server configuration, no certificates to renew manually.
+
+Service
+What It Does
+Setup
+Supabase
+PostgreSQL database. Free tier: 500MB storage, web SQL editor for emergencies, auto-backups.
+Create project at supabase.com. Copy DATABASE_URL from Settings. Paste into Render environment variables.
+Render.com
+Node.js server. Free: 512MB RAM, 750 hrs/month. Deploys on git push.
+Connect GitHub repo. Set DATABASE_URL, SESSION_SECRET, CLIENT_URL env vars. Build: npm install && npx prisma db push. Start: node server.js
+Vercel
+React frontend. Free: unlimited deploys, global CDN, automatic HTTPS.
+Connect GitHub repo. Set VITE_SERVER_URL to the Render URL. Deploy.
+UptimeRobot
+External health monitoring. Free: 5-min checks, Telegram alerts.
+Add monitor for /health endpoint. Prevents Render free-tier cold starts by pinging every 5 minutes.
+
+# Render environment variables
+DATABASE_URL   = postgresql://... (from Supabase)
+SESSION_SECRET = any-random-32-char-string
+CLIENT_URL     = https://your-app.vercel.app
+
+# Vercel environment variable
+VITE_SERVER_URL = https://your-app.render.com
+
+
+Cold Start Warning
+Render free tier pauses after 15 minutes of inactivity. Startup takes 20-30 seconds. UptimeRobot pinging /health every 5 minutes prevents this entirely. Set it up before the event. It costs nothing and takes 3 minutes.
+
+10. Event Day Operations
+30 Minutes Before the Event
+	•	Open the Supabase SQL editor in a browser tab. Keep it open for emergencies.
+	•	Open Render logs dashboard in a browser tab.
+	•	Verify /health returns 200. Verify admin login works. Verify /display is loading on the projector.
+	•	Send participants the URL 30 minutes early. They log in, see their starting capital, and verify their account. This catches all credential issues before the event starts. It is the single most effective risk reduction step on event day.
+	•	Confirm UptimeRobot has not sent any alerts in the last hour.
+
+The One-Page Admin Cheat Sheet
+Print this. Laminate it. Give it to every admin operator. This is the only documentation they need during the event.
+
+Round
+Theme
+Admin Actions
+Round 1
+Market Opening
+Start Round. No news events. Let participants explore. End after 15 minutes. Do not reveal leaderboard.
+Round 2
+Industry News
+Start Round. At 5 min: news event, one sector +10-15%. At 10 min: second news, another sector -10%. End round. Reveal leaderboard.
+Round 3
+Macro Shock
+Start Round. At 5 min: global shock broadcast (war / pandemic / rate change). Apply large sector shocks (+20-25% and -10-15%). End round. Reveal leaderboard.
+Round 4
+Corporate Events
+Start Round. Broadcast a major corporate announcement. Direct shock to the affected company (+20%). At 10 min: second corporate event, negative shock to another company.
+Round 5
+Board Voting
+Start Round. Free broadcast: "Board of Directors vote in progress - will the CEO resign?" Participants trade on speculation. At 10 min: broadcast the outcome. Apply shock.
+Round 6
+Leaked Intel
+Start Round. Free broadcast: "[LEAKED - UNVERIFIED] Merger talks between two companies." Participants trade. At 12 min: reveal truth via broadcast. Apply shock.
+Round 7
+Breakthroughs
+Start Round. At 3 min: broadcast a world-changing invention. Massive sector shock (+40%). At 12 min: second invention in a different sector. End round. Reveal final leaderboard with ceremony.
+
+If Something Goes Wrong
+	•	Prices look wrong: Use Direct Shock to correct any stock. 10 seconds.
+	•	Participant cannot log in: Open Supabase SQL editor. Run: UPDATE users SET password_hash = 'new_hash' WHERE username = '...'. Or create a spare account in advance.
+	•	Server restarts unexpectedly: Sessions are in PostgreSQL. Participants stay logged in. Price engine restarts automatically. One 10-second price gap. No action needed.
+	•	A trade was clearly incorrect: Open Supabase SQL editor. Manually adjust cash_balance and delete the trade record. Takes 2 minutes.
+	•	Something is badly broken: Click HALT TRADING immediately. Announce a brief technical pause. Fix the issue. Resume. A 5-minute pause is forgotten. A bad trade that cannot be undone is not.
+
+11. Non-Obvious Improvements
+These decisions do not add visible complexity but prevent real failures. Each takes under an hour to implement.
+
+1. Database-backed sessions prevent a catastrophic restart
+Covered in Section 5.4. Repeated here because it is commonly omitted and the consequences are severe: 150 participants simultaneously logged out mid-event. connect-pg-simple is five lines of code.
+
+2. Hard price limits eliminate calibration
+Built into the price engine: no stock can fall below 20% of its base price or rise above 600%. This means the admin team does not need to tune volatility parameters before the event or monitor for price runaway during it. The engine is self-bounding.
+
+3. The free broadcast replaces five optional features
+Leaked intelligence, analyst reports, board announcements, voting outcomes, rumour rounds — every one of these originally required custom mechanics. They all reduce to the same action: show everyone some text and let them react. The admin's free broadcast textarea handles all of them. This is not a compromise; it is a more honest representation of what these mechanics actually are.
+
+4. State sync on every connection is the entire reconnection strategy
+When a participant reconnects — WiFi hiccup, phone screen lock, accidental tab close — they receive current prices, round status, and leaderboard visibility immediately on connection. No reconnection-specific code path. The /display screen also recovers automatically if it is accidentally closed.
+
+5. Send participants the URL 30 minutes before the event
+A 150-person simultaneous login spike with credential confusion is the most common event-day crisis. Distributing the URL early and asking participants to verify their login beforehand converts this spike into a smooth 30-minute distribution. Credential issues surface before the event starts, not during it.
+
+6. Optimistic UI makes trades feel instant
+When a participant submits a trade, update the UI immediately before the server responds. Show the trade as pending. On server success, confirm. On failure, revert and show the inline error. On campus WiFi with 400-600ms latency to Render, without optimistic updates the interface feels broken. With them, it feels instant.
+
+7. Admin sees a price preview before broadcasting
+Before the admin clicks Broadcast on a news event, show the estimated new prices: "This will move VNTCH from 482 to approximately 554 (+15%)." This is two lines of JavaScript in the form handler. It prevents the most common admin error under event pressure: applying a shock in the wrong direction or to the wrong magnitude.
+
+8. All prices in one object per tick
+The price_update event carries { VNTCH: 482.5, VNDFN: 315.0, ... } for all tickers at once. Clients replace their entire price map each tick. This eliminates stale state bugs, makes portfolio computation trivial, and automatically includes any new IPO stock added mid-event without any changes to broadcast logic.
+
+9. Leaderboard computed in memory, not on demand
+The leaderboard runs alongside the price engine: recomputed every 30 seconds, stored in a server-side variable. When the admin clicks Reveal in front of 150 students, the response is instant. No database query at the high-attention moment.
+
+10. One health check, one uptime monitor, one Telegram alert
+GET /health returns 200. UptimeRobot monitors it every 5 minutes. If it goes down, you receive a Telegram notification within 5 minutes. Setup takes 10 minutes. This is the complete monitoring and alerting stack for a 4-hour event. You do not need Grafana. You need to know when the server is down.
+
+Appendix A: Sample Stock Universe
+Fifteen stocks across twelve sectors. Seed data for prisma db seed. Penny stocks carry higher volatility bands and lower absolute prices.
+
+Ticker
+Company
+Sector
+Type
+Base Price
+Vol %
+VNTCH
+Venturer Technologies
+Technology
+Regular
+480
+5%
+VNDFN
+VentureDefense Ltd
+Defense
+Regular
+310
+6%
+GRNRG
+GreenPower Energy
+Energy
+Regular
+220
+7%
+MEDHC
+MedCore Healthcare
+Healthcare
+Regular
+150
+5%
+AGRFM
+AgroFarm Industries
+Agriculture
+Regular
+95
+6%
+STELB
+StellarBank Financial
+Banking
+Regular
+200
+5%
+TELEQ
+TeleQuest Telecom
+Telecom
+Regular
+175
+4%
+REALX
+RealtX Properties
+Real Estate
+Regular
+260
+5%
+AUTRX
+AutoRex Motors
+Automobile
+Regular
+320
+6%
+ENTFX
+EntertainFX Media
+Entertainment
+Regular
+130
+7%
+COMXZ
+CommodiXZ Trading
+Commodity
+Regular
+85
+8%
+FODBZ
+FoodBuzz FMCG
+Food
+Regular
+110
+4%
+PNKBT
+PinkBit Micro Tech
+Technology
+Penny
+12
+15%
+PNKRG
+PinkRig Energy
+Energy
+Penny
+8
+18%
+PNKMD
+PinkMed Labs
+Healthcare
+Penny
+5
+20%
+
+Appendix B: Round Playbook
+A scripted scenario for each round. The admin team should know these by the event. Every round listed here can be run using only the four core features — the free broadcast handles all narrative events.
+
+Round
+Theme
+Suggested Admin Actions
+Round 1
+15 min
+Market Opening
+Start round. No news events. Let participants explore the interface and make initial trades. End round. Do not reveal leaderboard.
+Round 2
+15 min
+Industry News
+Start round. At 5 min: positive news for Tech sector (+12%). At 10 min: negative news for Banking (-10%). End round. Reveal leaderboard.
+Round 3
+20 min
+Macro Shock
+Start round. At 5 min: broadcast "Global oil crisis declared." Shock Energy (+25%), Agriculture (+10%), Automobile (-15%). At 12 min: "Central bank raises repo rate 100bps." Shock Banking (-12%), Real Estate (-10%). End round. Reveal leaderboard.
+Round 4
+20 min
+Corporate Events
+Start round. At 5 min: broadcast "VentureDefense signs 2000 Cr government contract." Shock VNDFN (+20%). At 10 min: broadcast "MedCore CEO resigns amid scandal." Shock MEDHC (-18%). At 15 min: free broadcast "LEAKED: EntertainFX acquisition talks - unverified."
+Round 5
+20 min
+Board Voting
+Start round. Free broadcast: "Board vote in progress: will PinkMed Labs survive the funding crisis?" At 10 min: broadcast "CONFIRMED: Emergency funding secured." Shock PNKMD (+40%). End round.
+Round 6
+20 min
+Leaked Intelligence
+Start round. Free broadcast: "[CONFIDENTIAL - LEAKED] Merger agreement draft between VNTCH and AUTRX. Source unverified." At 12 min: "Merger confirmed." Shock both stocks. End round.
+Round 7
+25 min
+World-Changing Events
+Start round. At 3 min: "GreenPower announces commercially viable fusion reactor." Shock GRNRG (+50%), Energy (+15%), Commodity (-20%). At 12 min: "AutoRex unveils autonomous flying taxi." Shock AUTRX (+35%), TELEQ (+10%). End round. Final leaderboard reveal.
+
+Fallback for any round
+If an optional mechanic is not ready, replace any round's special event with a free broadcast and a direct price shock. The narrative is entirely in the admin's words. The platform only needs to deliver text and move prices.
