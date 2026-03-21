@@ -1,0 +1,82 @@
+import express, { type NextFunction, type Request, type Response } from 'express';
+import path from 'node:path';
+import { prisma } from './lib/db.js';
+import { env, isProduction } from './lib/env.js';
+import { HttpError } from './lib/errors.js';
+import { sessionMiddleware } from './lib/session.js';
+import { createApiRouter } from './routes/api.js';
+import { createAuthRouter } from './routes/auth.js';
+import type { MarketRuntime } from './services/marketRuntime.js';
+import type { MarketService } from './services/marketService.js';
+import type { TradeService } from './services/tradeService.js';
+
+const clientDistPath = path.resolve(process.cwd(), 'dist/client');
+
+export const createApp = (
+  runtime: MarketRuntime,
+  marketService: MarketService,
+  tradeService: TradeService,
+) => {
+  const app = express();
+
+  app.set('trust proxy', 1);
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: true }));
+  app.use(sessionMiddleware);
+
+  app.get('/health', async (_req, res, next) => {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      const state = runtime.getMarketState();
+      const lastTickAt = state.lastTickAt ? new Date(state.lastTickAt).getTime() : null;
+      const tickIsFresh =
+        state.roundStatus !== 'ACTIVE' ||
+        state.tradingHalted ||
+        (lastTickAt !== null && Date.now() - lastTickAt < env.priceTickMs * 3);
+
+      res.status(tickIsFresh ? 200 : 503).json({
+        ok: tickIsFresh,
+        database: 'connected',
+        marketState: state,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.use('/auth', createAuthRouter(runtime));
+  app.use('/api', createApiRouter(runtime, marketService, tradeService));
+
+  if (isProduction) {
+    app.use(express.static(clientDistPath));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api') || req.path.startsWith('/auth')) {
+        next();
+        return;
+      }
+      res.sendFile(path.join(clientDistPath, 'index.html'));
+    });
+  }
+
+  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const statusCode =
+      error instanceof HttpError
+        ? error.statusCode
+        : typeof error === 'object' && error !== null && 'statusCode' in error
+          ? Number((error as { statusCode?: number }).statusCode ?? 500)
+          : 500;
+
+    const message =
+      error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+          ? error
+          : 'Unexpected server error.';
+
+    res.status(statusCode).json({
+      error: message,
+    });
+  });
+
+  return app;
+};
