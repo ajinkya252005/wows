@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import type { MarketSnapshotDto, PortfolioDto, PublicDisplaySnapshotDto } from '../../../src/shared/contracts.js';
+import { backendOrigin } from '../lib/backend.js';
 
 interface AuthSocketOptions {
   enabled: boolean;
@@ -30,7 +31,7 @@ export const useAuthenticatedSocket = ({
   useEffect(() => {
     if (!enabled) return undefined;
 
-    const socket = io({
+    const socket = io(backendOrigin || undefined, {
       withCredentials: true,
       transports: ['websocket', 'polling'],
     });
@@ -64,7 +65,7 @@ export const useDisplaySocket = (
   useEffect(() => {
     if (!enabled) return undefined;
 
-    const socket = io({
+    const socket = io(backendOrigin || undefined, {
       autoConnect: true,
       transports: ['websocket', 'polling'],
       auth: { mode: 'display' },

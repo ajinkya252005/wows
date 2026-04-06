@@ -1,3 +1,5 @@
+import { resolveBackendUrl } from './lib/backend.js';
+
 export class ApiError extends Error {
   status: number;
 
@@ -20,7 +22,7 @@ export const request = async <T>(path: string, options: RequestOptions = {}): Pr
     body = JSON.stringify(body);
   }
 
-  const response = await fetch(path, {
+  const response = await fetch(resolveBackendUrl(path), {
     credentials: 'include',
     ...options,
     headers,

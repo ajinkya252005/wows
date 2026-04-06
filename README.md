@@ -24,6 +24,7 @@ Same-origin stock market simulation platform for the Venturers EDC event. The ba
 - Build client and server: `npm run build`
 - Run committed migrations: `npm run prisma:deploy`
 - Start the server: `npm start`
+- For split hosting on Netlify + Render + Neon, follow [`DEPLOYMENT.md`](./DEPLOYMENT.md)
 
 ## Seeded Accounts
 

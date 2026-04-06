@@ -20,6 +20,34 @@ export const createApp = (
   const app = express();
 
   app.set('trust proxy', 1);
+  app.use((req, res, next) => {
+    const requestOrigin =
+      typeof req.headers.origin === 'string'
+        ? req.headers.origin.replace(/\/$/, '')
+        : undefined;
+
+    if (env.clientUrl && requestOrigin && requestOrigin !== env.clientUrl) {
+      res.status(403).json({
+        error: 'Origin not allowed.',
+      });
+      return;
+    }
+
+    if (env.clientUrl && requestOrigin === env.clientUrl) {
+      res.header('Access-Control-Allow-Origin', requestOrigin);
+      res.header('Vary', 'Origin');
+      res.header('Access-Control-Allow-Credentials', 'true');
+      res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+
+    next();
+  });
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true }));
   app.use(sessionMiddleware);
@@ -47,7 +75,7 @@ export const createApp = (
   app.use('/auth', createAuthRouter(runtime));
   app.use('/api', createApiRouter(runtime, marketService, tradeService));
 
-  if (isProduction) {
+  if (isProduction && env.serveStaticClient) {
     app.use(express.static(clientDistPath));
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api') || req.path.startsWith('/auth')) {

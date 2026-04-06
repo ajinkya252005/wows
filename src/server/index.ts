@@ -15,7 +15,7 @@ const bootstrap = async (): Promise<void> => {
   const server = http.createServer();
   const io = new SocketIOServer(server, {
     cors: {
-      origin: true,
+      origin: env.clientUrl || true,
       credentials: true,
     },
   });
