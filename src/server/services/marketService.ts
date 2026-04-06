@@ -1,10 +1,10 @@
 import bcrypt from 'bcrypt';
-import { AdminEventType, PrismaClient, RoundStatus } from '@prisma/client';
+import { AdminEventType, PrismaClient, RoundStatus, UserRole } from '@prisma/client';
 import { Decimal } from 'decimal.js';
 import { parseUserCsv } from '../lib/csv.js';
 import { HttpError } from '../lib/errors.js';
 import { toInputJson } from '../lib/json.js';
-import { decimalOf, moneyNumber } from '../lib/money.js';
+import { decimalOf, moneyNumber, roundMoney } from '../lib/money.js';
 import type { MarketRuntime } from './marketRuntime.js';
 import { calculateNextTickPrice, clampStockPrice } from './pricingEngine.js';
 
@@ -95,24 +95,38 @@ export class MarketService {
   }
 
   async startRound(roundId: number, actorId: number): Promise<void> {
+    if (!Number.isInteger(roundId) || roundId <= 0) {
+      throw new HttpError(400, 'A valid round is required.');
+    }
+
     await this.runtime.queueMarketMutation(
       async () => {
         await this.prisma.$transaction(async (tx) => {
-          const round = await tx.round.findUnique({ where: { id: roundId } });
+          const [round, marketState] = await Promise.all([
+            tx.round.findUnique({ where: { id: roundId } }),
+            tx.marketState.findUniqueOrThrow({ where: { id: 1 } }),
+          ]);
+
           if (!round) {
             throw new HttpError(404, 'Round not found.');
           }
 
+          if (marketState.roundStatus === RoundStatus.ACTIVE && marketState.currentRoundId === roundId) {
+            throw new HttpError(409, `${round.name} is already active.`);
+          }
+
+          const startedAt = new Date();
+
           await tx.round.updateMany({
             where: { status: RoundStatus.ACTIVE },
-            data: { status: RoundStatus.ENDED, endedAt: new Date() },
+            data: { status: RoundStatus.ENDED, endedAt: startedAt },
           });
 
           await tx.round.update({
             where: { id: roundId },
             data: {
               status: RoundStatus.ACTIVE,
-              startedAt: round.startedAt ?? new Date(),
+              startedAt,
               endedAt: null,
             },
           });
@@ -128,6 +142,7 @@ export class MarketService {
               roundStatus: RoundStatus.ACTIVE,
               tradingHalted: false,
               leaderboardVisible: false,
+              lastTickAt: startedAt,
               eventVersion: { increment: 1 },
             },
           });
@@ -162,7 +177,7 @@ export class MarketService {
         await this.prisma.$transaction(async (tx) => {
           const marketState = await tx.marketState.findUniqueOrThrow({ where: { id: 1 } });
 
-          if (!marketState.currentRoundId) {
+          if (!marketState.currentRoundId || marketState.roundStatus !== RoundStatus.ACTIVE) {
             throw new HttpError(409, 'No active round to end.');
           }
 
@@ -330,50 +345,83 @@ export class MarketService {
     payload: { sector: string; magnitudePct: number; reason?: string }
   ): Promise<void> {
     const { sector, magnitudePct } = payload;
-    
-    // 1. Find all stocks in that sector
-    const stocks = await this.prisma.stock.findMany({ 
-      where: { sector } 
-    });
+    await this.runtime.queueMarketMutation(
+      async () => {
+        await this.prisma.$transaction(async (tx) => {
+          const stocks = await tx.stock.findMany({
+            where: { sector },
+            orderBy: { ticker: 'asc' },
+          });
 
-    if (stocks.length === 0) {
-      throw new HttpError(404, 'Sector not found or has no stocks.');
-    }
+          if (stocks.length === 0) {
+            throw new HttpError(404, 'Sector not found or has no stocks.');
+          }
 
-    // 2. Prepare the database updates
-    const updates = stocks.map((stock) => {
-      const currentPrice = Number(stock.currentPrice);
-      const basePrice = Number(stock.basePrice);
-      const multiplier = 1 + magnitudePct / 100;
-      
-      let nextPrice = currentPrice * multiplier;
-      
-      // Simple Bounds constraints (max 6x base price, min 0.2x base price)
-      const ceiling = basePrice * 6;
-      const floor = basePrice * 0.2;
-      
-      if (nextPrice > ceiling) nextPrice = ceiling;
-      if (nextPrice < floor) nextPrice = floor;
+          const adjustments = stocks.map((stock) => {
+            const currentPrice = decimalOf(stock.currentPrice.toString());
+            const nextPrice = clampStockPrice(
+              stock.basePrice,
+              currentPrice.mul(new Decimal(1).add(new Decimal(magnitudePct).div(100))),
+            );
 
-      return this.prisma.stock.update({
-        where: { id: stock.id },
-        data: { currentPrice: nextPrice },
-      });
-    });
+            return {
+              id: stock.id,
+              ticker: stock.ticker,
+              beforePrice: moneyNumber(currentPrice),
+              afterPrice: moneyNumber(nextPrice),
+              nextPrice: nextPrice.toFixed(2),
+            };
+          });
 
-    // 3. Execute all updates at the same time
-    await this.prisma.$transaction(updates);
+          await Promise.all(
+            adjustments.map((stock) =>
+              tx.stock.update({
+                where: { id: stock.id },
+                data: { currentPrice: stock.nextPrice },
+              }),
+            ),
+          );
 
-    // 4. Record the admin event and refresh the market
-    await this.runtime.recordAdminEvent('SHOCK', actorId, payload);
-    await this.runtime.queueStateRefresh({ forceLeaderboardRefresh: true });
+          await tx.marketState.update({
+            where: { id: 1 },
+            data: { eventVersion: { increment: 1 } },
+          });
+
+          await tx.adminEvent.create({
+            data: {
+              type: AdminEventType.SHOCK,
+              actorId,
+              payload: toInputJson({
+                ...payload,
+                impactedTickers: adjustments.map((stock) => stock.ticker),
+                priceChanges: adjustments.map(({ ticker, beforePrice, afterPrice }) => ({
+                  ticker,
+                  beforePrice,
+                  afterPrice,
+                })),
+              }),
+            },
+          });
+        });
+      },
+      { forceLeaderboardRefresh: true },
+    );
   }
 
   async adjustUserCash(
     actorId: number,
     input: { targetUserId: number; amount: number; reason?: string }
   ): Promise<void> {
-    if (isNaN(input.amount) || input.amount === 0) {
+    if (!Number.isInteger(input.targetUserId) || input.targetUserId <= 0) {
+      throw new HttpError(400, 'A valid participant is required.');
+    }
+
+    if (!Number.isFinite(input.amount)) {
+      throw new HttpError(400, 'Invalid adjustment amount.');
+    }
+
+    const adjustment = roundMoney(input.amount);
+    if (adjustment.isZero()) {
       throw new HttpError(400, 'Invalid adjustment amount.');
     }
 
@@ -381,43 +429,56 @@ export class MarketService {
       async () => {
         await this.prisma.$transaction(async (tx) => {
           const targetUser = await tx.user.findUnique({
-            where: { id: input.targetUserId }
+            where: { id: input.targetUserId },
+            select: {
+              id: true,
+              role: true,
+              displayName: true,
+              cashBalance: true,
+            },
           });
 
           if (!targetUser) {
             throw new HttpError(404, 'Participant not found.');
           }
 
-          // Use Prisma's increment (which safely handles negative numbers for subtraction)
+          if (targetUser.role !== UserRole.PARTICIPANT) {
+            throw new HttpError(400, 'Cash adjustments can only be applied to participant desks.');
+          }
+
+          const beforeCashBalance = decimalOf(targetUser.cashBalance.toString());
+          const afterCashBalance = roundMoney(beforeCashBalance.add(adjustment));
+          if (afterCashBalance.isNegative()) {
+            throw new HttpError(409, 'Adjustment would make the participant balance negative.');
+          }
+
           await tx.user.update({
             where: { id: input.targetUserId },
             data: {
-              cashBalance: {
-                increment: input.amount
-              }
-            }
+              cashBalance: afterCashBalance.toFixed(2),
+            },
           });
 
-          // Log the manual correction in the admin timeline
           await tx.adminEvent.create({
             data: {
-              type: AdminEventType.MANUAL_CORRECTION, 
+              type: AdminEventType.MANUAL_CORRECTION,
               actorId,
               payload: toInputJson({
                 targetUserId: input.targetUserId,
-                amount: input.amount,
-                reason: input.reason
+                targetDisplayName: targetUser.displayName,
+                amount: moneyNumber(adjustment),
+                beforeCashBalance: moneyNumber(beforeCashBalance),
+                afterCashBalance: moneyNumber(afterCashBalance),
+                reason: input.reason?.trim() || null,
               }),
             },
           });
         });
-
-        // Push the new portfolio balance live to the specific participant
-        await this.runtime.emitPortfolioUpdate(input.targetUserId);
       },
-      // Force leaderboard to refresh so the admin sees the updated Net Liq/Cash immediately
-      { forceLeaderboardRefresh: true } 
+      { forceLeaderboardRefresh: true }
     );
+
+    await this.runtime.emitPortfolioUpdate(input.targetUserId);
   }
 
   async broadcastMessage(actorId: number, message: string): Promise<void> {

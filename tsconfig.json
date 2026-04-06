@@ -17,7 +17,6 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "baseUrl": ".",
-    "ignoreDeprecations": "6.0",
     
     // NEW: Explicitly tell TypeScript where your custom types live
     "typeRoots": [

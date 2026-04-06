@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { LeaderboardEntryDto, MarketSnapshotDto } from '../../../src/shared/contracts.js';
 import { request } from '../api.js';
 import type { UserSessionState } from '../App.js';
@@ -75,6 +75,7 @@ const Panel = ({ eyebrow, title, aside, icon, className = '', children }: any) =
    ════════════════════════════════════════════════ */
 
 export const AdminPage = ({ session, snapshot, participants, connected, onLogout, onRefreshParticipants }: AdminPageProps) => {
+  const refreshParticipantsRef = useRef(onRefreshParticipants);
   const [rounds, setRounds] = useState<RoundDto[]>([]);
   const [roundId, setRoundId] = useState<number | ''>('');
   const [impactTicker, setImpactTicker] = useState(snapshot.stocks[0]?.ticker ?? '');
@@ -110,8 +111,20 @@ export const AdminPage = ({ session, snapshot, participants, connected, onLogout
     })();
   }, []);
 
+  useEffect(() => {
+    refreshParticipantsRef.current = onRefreshParticipants;
+  }, [onRefreshParticipants]);
+
   useEffect(() => { if (!shockSector && availableSectors.length > 0) setShockSector(availableSectors[0]); }, [shockSector, availableSectors]);
-  useEffect(() => { const timer = window.setInterval(() => { void onRefreshParticipants(); }, 10_000); return () => window.clearInterval(timer); }, [onRefreshParticipants]);
+  useEffect(() => {
+    if (connected) return undefined;
+
+    const timer = window.setInterval(() => {
+      void refreshParticipantsRef.current();
+    }, 15_000);
+
+    return () => window.clearInterval(timer);
+  }, [connected]);
   useEffect(() => { if (statusMessage) { const t = setTimeout(() => setStatusMessage(null), 5000); return () => clearTimeout(t); } }, [statusMessage]);
   useEffect(() => { if (errorMessage) { const t = setTimeout(() => setErrorMessage(null), 8000); return () => clearTimeout(t); } }, [errorMessage]);
 
