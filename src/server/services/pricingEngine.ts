@@ -4,7 +4,7 @@ import { clamp, decimalOf, percentage, roundMoney } from '../lib/money.js';
 const PRICE_FLOOR_MULTIPLIER = new Decimal(0.2);
 const PRICE_CEILING_MULTIPLIER = new Decimal(6);
 
-const MIN_IDLE_MOVE_PCT = 0.0005; // Was 0.0025
+const MIN_IDLE_MOVE_PCT = 0.0001; // Was 0.0025
 const RANDOM_MOVE_SHARE = 0.10; // Was 0.16
 const SOFT_MEAN_REVERSION = 0.015;
 const HARD_MEAN_REVERSION = 0.04;
