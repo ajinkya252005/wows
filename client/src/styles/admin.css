@@ -457,13 +457,53 @@ body:has(.ap-shell)::after {
   scrollbar-color: rgba(201, 160, 80, 0.15) transparent;
 }
 
+.ap-quote-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+
+.ap-quote-toolbar .ap-input {
+  flex: 1;
+}
+
+.ap-quotes__empty {
+  padding: 1rem 0.75rem;
+  border: 1px dashed var(--ap-border);
+  border-radius: var(--ap-radius-sm);
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--ap-text-tertiary);
+}
+
 .ap-quote-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.6rem 0;
+  margin: 0 -0.4rem;
+  padding: 0.6rem 0.4rem;
   border-bottom: 1px solid var(--ap-border);
+  border-radius: var(--ap-radius-sm);
+  cursor: pointer;
+  transition:
+    background 0.2s var(--ap-ease),
+    box-shadow 0.2s var(--ap-ease);
+}
+
+.ap-quote-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ap-quote-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(201, 160, 80, 0.25);
+}
+
+.ap-quote-row--selected {
+  background: rgba(201, 160, 80, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(201, 160, 80, 0.18);
 }
 
 .ap-quote-row:last-child {
@@ -538,6 +578,12 @@ body:has(.ap-shell)::after {
   font-weight: 500;
   color: var(--ap-text-secondary);
   letter-spacing: 0.01em;
+}
+
+.ap-search-select {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
 }
 
 .ap-input,
@@ -622,6 +668,12 @@ body:has(.ap-shell)::after {
 
 .ap-btn:active:not(:disabled) {
   transform: scale(0.97);
+}
+
+.ap-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .ap-btn--sm {
@@ -724,6 +776,14 @@ body:has(.ap-shell)::after {
   display: flex;
   align-items: center;
   gap: 0.4rem;
+}
+
+.ap-impact-builder__selector {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
 }
 
 .ap-impact-builder__row .ap-select {
@@ -1036,6 +1096,17 @@ body:has(.ap-shell)::after {
 
   .ap-duo {
     grid-template-columns: 1fr;
+  }
+
+  .ap-quote-toolbar,
+  .ap-impact-builder__row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ap-impact-builder__row .ap-input--narrow {
+    max-width: none;
+    text-align: left;
   }
 
   .ap-header {

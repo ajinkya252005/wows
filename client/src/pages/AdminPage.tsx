@@ -20,6 +20,11 @@ interface RoundDto {
   status: string;
 }
 
+interface SearchOption {
+  value: string;
+  label: string;
+}
+
 const formatCurrency = (value: number) =>
   new Intl.NumberFormat('en-IN', {
     style: 'currency',
@@ -35,6 +40,14 @@ const formatCurrencyShort = (value: number) =>
   }).format(value);
 
 const formatSignedPercent = (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+const normalizeLookup = (value: string) => value.trim().toLowerCase();
+const isSignedNumberDraft = (value: string) => /^-?\d*(\.\d*)?$/.test(value);
+const parseSignedNumberDraft = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '-' || trimmed === '.' || trimmed === '-.') return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+};
 
 /* ── Inline icon components ──────────────────── */
 const Icon = {
@@ -70,6 +83,43 @@ const Panel = ({ eyebrow, title, aside, icon, className = '', children }: any) =
   </section>
 );
 
+const SearchSelectField = ({
+  label,
+  searchValue,
+  searchPlaceholder,
+  onSearchChange,
+  selectValue,
+  onSelectChange,
+  options,
+}: {
+  label: string;
+  searchValue: string;
+  searchPlaceholder: string;
+  onSearchChange: (value: string) => void;
+  selectValue: string;
+  onSelectChange: (value: string) => void;
+  options: SearchOption[];
+}) => (
+  <div className="ap-field">
+    <label className="ap-field__label">{label}</label>
+    <div className="ap-search-select">
+      <input
+        className="ap-input"
+        value={searchValue}
+        onChange={(event) => onSearchChange(event.target.value)}
+        placeholder={searchPlaceholder}
+      />
+      <select className="ap-select" value={selectValue} onChange={(event) => onSelectChange(event.target.value)}>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  </div>
+);
+
 /* ════════════════════════════════════════════════
    MAIN ADMIN COMPONENT
    ════════════════════════════════════════════════ */
@@ -79,29 +129,34 @@ export const AdminPage = ({ session, snapshot, participants, connected, onLogout
   const [rounds, setRounds] = useState<RoundDto[]>([]);
   const [roundId, setRoundId] = useState<number | ''>('');
   const [impactTicker, setImpactTicker] = useState(snapshot.stocks[0]?.ticker ?? '');
-  const [impactMagnitude, setImpactMagnitude] = useState(10);
+  const [impactTickerSearch, setImpactTickerSearch] = useState(snapshot.stocks[0]?.ticker ?? '');
+  const [impactMagnitude, setImpactMagnitude] = useState('10');
   const [impacts, setImpacts] = useState<Array<{ ticker: string; magnitudePct: number }>>([]);
   const [newsHeadline, setNewsHeadline] = useState('');
   const [newsDetail, setNewsDetail] = useState('');
   
   // Single Shock State
   const [shockTicker, setShockTicker] = useState(snapshot.stocks[0]?.ticker ?? '');
-  const [shockMagnitude, setShockMagnitude] = useState(15);
+  const [shockTickerSearch, setShockTickerSearch] = useState(snapshot.stocks[0]?.ticker ?? '');
+  const [shockMagnitude, setShockMagnitude] = useState('15');
   
   // Sector Shock State 
   const availableSectors = Array.from(new Set(snapshot.stocks.map((s) => s.sector))).sort();
   const [shockSector, setShockSector] = useState(availableSectors[0] ?? '');
-  const [shockSectorMagnitude, setShockSectorMagnitude] = useState(10);
+  const [shockSectorSearch, setShockSectorSearch] = useState(availableSectors[0] ?? '');
+  const [shockSectorMagnitude, setShockSectorMagnitude] = useState('10');
 
   // Manual Cash Adjust State 
   const [adjustUserId, setAdjustUserId] = useState<number | ''>('');
-  const [adjustAmount, setAdjustAmount] = useState<number>(0);
+  const [adjustAmount, setAdjustAmount] = useState('0');
   
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [csv, setCsv] = useState('username,password,displayName,role\nparticipant01,market-ready,Participant 01,PARTICIPANT');
   const [haltConfirmation, setHaltConfirmation] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [quoteSearch, setQuoteSearch] = useState('');
+  const [selectedQuoteTicker, setSelectedQuoteTicker] = useState(snapshot.stocks[0]?.ticker ?? '');
 
   useEffect(() => {
     void (async () => {
@@ -115,7 +170,12 @@ export const AdminPage = ({ session, snapshot, participants, connected, onLogout
     refreshParticipantsRef.current = onRefreshParticipants;
   }, [onRefreshParticipants]);
 
-  useEffect(() => { if (!shockSector && availableSectors.length > 0) setShockSector(availableSectors[0]); }, [shockSector, availableSectors]);
+  useEffect(() => {
+    if (!shockSector && availableSectors.length > 0) {
+      setShockSector(availableSectors[0]);
+      setShockSectorSearch(availableSectors[0]);
+    }
+  }, [shockSector, availableSectors]);
   useEffect(() => {
     if (connected) return undefined;
 
@@ -154,11 +214,159 @@ export const AdminPage = ({ session, snapshot, participants, connected, onLogout
 
   // FIX 3: Lock the Desks dropdown alphabetically so it NEVER reshuffles while you are clicking
   const alphabeticalDesks = [...participants].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const impactMagnitudeValue = parseSignedNumberDraft(impactMagnitude);
+  const shockMagnitudeValue = parseSignedNumberDraft(shockMagnitude);
+  const shockSectorMagnitudeValue = parseSignedNumberDraft(shockSectorMagnitude);
+  const adjustAmountValue = parseSignedNumberDraft(adjustAmount);
+  const filteredQuoteDeck = !quoteSearch.trim()
+    ? quoteDeck
+    : quoteDeck.filter((stock) =>
+        normalizeLookup(`${stock.ticker} ${stock.companyName} ${stock.sector}`).includes(normalizeLookup(quoteSearch)),
+      );
+  const selectedQuoteStock =
+    filteredQuoteDeck.find((stock) => stock.ticker === selectedQuoteTicker) ??
+    filteredQuoteDeck[0] ??
+    null;
 
   const runAction = async (task: () => Promise<void>, successMessage: string) => {
     setErrorMessage(null); setStatusMessage(null);
     try { await task(); setStatusMessage(successMessage); } catch (error) { setErrorMessage(error instanceof Error ? error.message : 'Action failed.'); }
   };
+
+  const findStockMatch = (query: string) => {
+    const lookup = normalizeLookup(query);
+    if (!lookup) return null;
+
+    return (
+      quoteDeck.find((stock) => normalizeLookup(stock.ticker) === lookup || normalizeLookup(stock.companyName) === lookup) ??
+      quoteDeck.find((stock) => normalizeLookup(stock.ticker).startsWith(lookup)) ??
+      quoteDeck.find((stock) => normalizeLookup(stock.companyName).startsWith(lookup)) ??
+      quoteDeck.find((stock) => normalizeLookup(`${stock.ticker} ${stock.companyName} ${stock.sector}`).includes(lookup)) ??
+      null
+    );
+  };
+
+  const findSectorMatch = (query: string) => {
+    const lookup = normalizeLookup(query);
+    if (!lookup) return null;
+    return availableSectors.find((sector) => normalizeLookup(sector).includes(lookup)) ?? null;
+  };
+
+  const getStockOptions = (query: string, selectedTicker: string) => {
+    const lookup = normalizeLookup(query);
+    const filtered = !lookup
+      ? quoteDeck
+      : quoteDeck.filter((stock) => normalizeLookup(`${stock.ticker} ${stock.companyName} ${stock.sector}`).includes(lookup));
+    const selected = quoteDeck.find((stock) => stock.ticker === selectedTicker);
+    const merged = selected && !filtered.some((stock) => stock.ticker === selectedTicker) ? [selected, ...filtered] : filtered;
+    const options = merged.length > 0 ? merged : quoteDeck;
+    return options.map((stock) => ({ value: stock.ticker, label: `${stock.ticker} - ${stock.companyName}` }));
+  };
+
+  const getSectorOptions = (query: string, selectedSector: string) => {
+    const lookup = normalizeLookup(query);
+    const filtered = !lookup ? availableSectors : availableSectors.filter((sector) => normalizeLookup(sector).includes(lookup));
+    const merged = selectedSector && !filtered.includes(selectedSector) ? [selectedSector, ...filtered] : filtered;
+    const options = merged.length > 0 ? merged : availableSectors;
+    return options.map((sector) => ({ value: sector, label: sector }));
+  };
+
+  const validateDraftNumber = (value: string, label: string) => {
+    const parsed = parseSignedNumberDraft(value);
+    if (parsed === null) {
+      setStatusMessage(null);
+      setErrorMessage(`${label} must be a valid number.`);
+      return null;
+    }
+    return parsed;
+  };
+
+  const handleSignedNumberChange = (nextValue: string, setter: (value: string) => void) => {
+    if (isSignedNumberDraft(nextValue)) {
+      setter(nextValue);
+    }
+  };
+
+  const handleImpactSearchChange = (nextValue: string) => {
+    setImpactTickerSearch(nextValue);
+    const matched = findStockMatch(nextValue);
+    if (matched) setImpactTicker(matched.ticker);
+  };
+
+  const handleShockTickerSearchChange = (nextValue: string) => {
+    setShockTickerSearch(nextValue);
+    const matched = findStockMatch(nextValue);
+    if (matched) setShockTicker(matched.ticker);
+  };
+
+  const handleSectorSearchChange = (nextValue: string) => {
+    setShockSectorSearch(nextValue);
+    const matched = findSectorMatch(nextValue);
+    if (matched) setShockSector(matched);
+  };
+
+  const handleCopyShortForm = () => {
+    if (!selectedQuoteStock) {
+      setStatusMessage(null);
+      setErrorMessage('Select a stock in the Quote Deck to copy its short form.');
+      return;
+    }
+
+    void runAction(async () => {
+      if (!navigator.clipboard) {
+        throw new Error('Clipboard access is unavailable in this browser.');
+      }
+      await navigator.clipboard.writeText(selectedQuoteStock.ticker);
+    }, `${selectedQuoteStock.ticker} copied to clipboard.`);
+  };
+
+  const handleAddImpact = () => {
+    const parsedMagnitude = validateDraftNumber(impactMagnitude, 'Impact magnitude');
+    if (parsedMagnitude === null) return;
+    setImpacts((current) => [...current, { ticker: impactTicker, magnitudePct: parsedMagnitude }]);
+  };
+
+  const handleDirectShock = () => {
+    const parsedMagnitude = validateDraftNumber(shockMagnitude, 'Direct shock magnitude');
+    if (parsedMagnitude === null) return;
+    void runAction(
+      () => request('/api/admin/shock', { method: 'POST', body: { ticker: shockTicker, magnitudePct: parsedMagnitude } }),
+      'Direct shock applied.',
+    );
+  };
+
+  const handleSectorShock = () => {
+    const parsedMagnitude = validateDraftNumber(shockSectorMagnitude, 'Sector shock magnitude');
+    if (parsedMagnitude === null) return;
+    void runAction(
+      () => request('/api/admin/shock/sector', { method: 'POST', body: { sector: shockSector, magnitudePct: parsedMagnitude } }),
+      `Sector shock applied to ${shockSector}.`,
+    );
+  };
+
+  const handleCashAdjust = () => {
+    const parsedAmount = validateDraftNumber(adjustAmount, 'Adjustment amount');
+    if (parsedAmount === null || parsedAmount === 0) {
+      if (parsedAmount === 0) {
+        setStatusMessage(null);
+        setErrorMessage('Adjustment amount must be greater than zero or less than zero.');
+      }
+      return;
+    }
+
+    void runAction(
+      () => request('/api/admin/users/adjust-cash', { method: 'POST', body: { targetUserId: adjustUserId, amount: parsedAmount } }),
+      `Adjusted cash by ${formatCurrencyShort(parsedAmount)}.`,
+    );
+  };
+
+  useEffect(() => {
+    if (filteredQuoteDeck.length === 0) return;
+    const selectionVisible = filteredQuoteDeck.some((stock) => stock.ticker === selectedQuoteTicker);
+    if (!selectionVisible) {
+      setSelectedQuoteTicker(filteredQuoteDeck[0].ticker);
+    }
+  }, [filteredQuoteDeck, selectedQuoteTicker]);
 
   return (
     <main className="ap-shell">
@@ -201,11 +409,37 @@ export const AdminPage = ({ session, snapshot, participants, connected, onLogout
         {/* ── LEFT: Market & Controls ── */}
         <div className="ap-col ap-col--left">
           <Panel eyebrow="Market Pulse" title="Quote Deck" icon={<Icon.Activity />} aside={<span className="ap-badge">{snapshot.stocks.length} names</span>}>
+            <div className="ap-quote-toolbar">
+              <input
+                className="ap-input"
+                value={quoteSearch}
+                onChange={(event) => setQuoteSearch(event.target.value)}
+                placeholder="Search ticker, company, or sector"
+              />
+              <button className="ap-btn ap-btn--ghost ap-btn--sm" onClick={handleCopyShortForm} disabled={!selectedQuoteStock}>
+                Copy Short Form
+              </button>
+            </div>
             <div className="ap-quotes">
-              {quoteDeck.map((stock) => {
+              {filteredQuoteDeck.length === 0 && (
+                <div className="ap-quotes__empty">No stocks match that search.</div>
+              )}
+              {filteredQuoteDeck.map((stock) => {
                 const deltaPct = ((stock.currentPrice - stock.basePrice) / (stock.basePrice || 1)) * 100;
                 return (
-                  <article key={stock.id} className="ap-quote-row">
+                  <article
+                    key={stock.id}
+                    className={`ap-quote-row ${selectedQuoteTicker === stock.ticker ? 'ap-quote-row--selected' : ''}`}
+                    onClick={() => setSelectedQuoteTicker(stock.ticker)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setSelectedQuoteTicker(stock.ticker);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                  >
                     <div className="ap-quote-row__meta"><span className="ap-quote-row__ticker">{stock.ticker}</span><strong>{stock.companyName}</strong><span className="ap-quote-row__supply">{stock.availableSupply.toLocaleString()} avail</span></div>
                     <div className="ap-quote-row__price"><strong>{formatCurrency(stock.currentPrice)}</strong><span className={`ap-pct ${deltaPct >= 0 ? 'ap-pct--up' : 'ap-pct--down'}`}>{formatSignedPercent(deltaPct)}</span></div>
                   </article>
@@ -255,22 +489,17 @@ export const AdminPage = ({ session, snapshot, participants, connected, onLogout
               <label className="ap-field__label">Adjustment Amount (±)</label>
               <input 
                 className="ap-input" 
-                type="number" 
+                type="text"
+                inputMode="decimal"
                 value={adjustAmount} 
-                onChange={(e) => setAdjustAmount(Number(e.target.value))} 
+                onChange={(e) => handleSignedNumberChange(e.target.value, setAdjustAmount)} 
                 placeholder="e.g., 50000 or -10000" 
               />
             </div>
             <button 
               className="ap-btn ap-btn--warning ap-btn--full" 
-              disabled={!adjustUserId || adjustAmount === 0}
-              onClick={() => void runAction(
-                () => request('/api/admin/users/adjust-cash', { 
-                  method: 'POST', 
-                  body: { targetUserId: adjustUserId, amount: adjustAmount } 
-                }), 
-                `Adjusted cash by ${formatCurrencyShort(adjustAmount)}.`
-              )}
+              disabled={!adjustUserId || adjustAmountValue === null || adjustAmountValue === 0}
+              onClick={handleCashAdjust}
             >
               <Icon.Zap /><span>Apply Adjustment</span>
             </button>
@@ -285,10 +514,37 @@ export const AdminPage = ({ session, snapshot, participants, connected, onLogout
             <div className="ap-impact-builder">
               <span className="ap-field__label">Impact Builder</span>
               <div className="ap-impact-builder__row">
-                <select className="ap-select" value={impactTicker} onChange={(e) => setImpactTicker(e.target.value)}>{quoteDeck.map((s) => <option key={s.id} value={s.ticker}>{s.ticker}</option>)}</select>
-                <input className="ap-input ap-input--narrow" type="number" value={impactMagnitude} onChange={(e) => setImpactMagnitude(Number(e.target.value))} />
+                <div className="ap-impact-builder__selector">
+                  <input
+                    className="ap-input"
+                    value={impactTickerSearch}
+                    onChange={(event) => handleImpactSearchChange(event.target.value)}
+                    placeholder="Type ticker or company"
+                  />
+                  <select
+                    className="ap-select"
+                    value={impactTicker}
+                    onChange={(event) => {
+                      setImpactTicker(event.target.value);
+                      setImpactTickerSearch(event.target.value);
+                    }}
+                  >
+                    {getStockOptions(impactTickerSearch, impactTicker).map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <input
+                  className="ap-input ap-input--narrow"
+                  type="text"
+                  inputMode="decimal"
+                  value={impactMagnitude}
+                  onChange={(event) => handleSignedNumberChange(event.target.value, setImpactMagnitude)}
+                />
                 <span className="ap-impact-builder__unit">%</span>
-                <button className="ap-btn ap-btn--ghost ap-btn--sm" onClick={() => setImpacts((c) => [...c, { ticker: impactTicker, magnitudePct: impactMagnitude }])}>Add</button>
+                <button className="ap-btn ap-btn--ghost ap-btn--sm" onClick={handleAddImpact} disabled={!impactTicker || impactMagnitudeValue === null}>Add</button>
               </div>
             </div>
             {impacts.length > 0 && (
@@ -308,15 +564,37 @@ export const AdminPage = ({ session, snapshot, participants, connected, onLogout
           {/* Side-by-Side Shock Tools */}
           <div className="ap-duo">
             <Panel eyebrow="Single Asset" title="Direct Shock" icon={<Icon.Zap />}>
-              <div className="ap-field"><label className="ap-field__label">Stock</label><select className="ap-select" value={shockTicker} onChange={(e) => setShockTicker(e.target.value)}>{quoteDeck.map((s) => <option key={s.id} value={s.ticker}>{s.ticker}</option>)}</select></div>
-              <div className="ap-field"><label className="ap-field__label">Magnitude (%)</label><input className="ap-input" type="number" value={shockMagnitude} onChange={(e) => setShockMagnitude(Number(e.target.value))} /></div>
-              <button className="ap-btn ap-btn--warning ap-btn--full" onClick={() => void runAction(() => request('/api/admin/shock', { method: 'POST', body: { ticker: shockTicker, magnitudePct: shockMagnitude } }), 'Direct shock applied.')}><Icon.Zap /><span>Fire Shock</span></button>
+              <SearchSelectField
+                label="Stock"
+                searchValue={shockTickerSearch}
+                searchPlaceholder="Type ticker or company"
+                onSearchChange={handleShockTickerSearchChange}
+                selectValue={shockTicker}
+                onSelectChange={(value) => {
+                  setShockTicker(value);
+                  setShockTickerSearch(value);
+                }}
+                options={getStockOptions(shockTickerSearch, shockTicker)}
+              />
+              <div className="ap-field"><label className="ap-field__label">Magnitude (%)</label><input className="ap-input" type="text" inputMode="decimal" value={shockMagnitude} onChange={(e) => handleSignedNumberChange(e.target.value, setShockMagnitude)} placeholder="Type % or -%" /></div>
+              <button className="ap-btn ap-btn--warning ap-btn--full" onClick={handleDirectShock} disabled={!shockTicker || shockMagnitudeValue === null}><Icon.Zap /><span>Fire Shock</span></button>
             </Panel>
 
             <Panel eyebrow="Broad Market" title="Sector Shock" icon={<Icon.Activity />}>
-              <div className="ap-field"><label className="ap-field__label">Sector</label><select className="ap-select" value={shockSector} onChange={(e) => setShockSector(e.target.value)}>{availableSectors.map((s) => <option key={s} value={s}>{s}</option>)}</select></div>
-              <div className="ap-field"><label className="ap-field__label">Magnitude (%)</label><input className="ap-input" type="number" value={shockSectorMagnitude} onChange={(e) => setShockSectorMagnitude(Number(e.target.value))} /></div>
-              <button className="ap-btn ap-btn--warning ap-btn--full" onClick={() => void runAction(() => request('/api/admin/shock/sector', { method: 'POST', body: { sector: shockSector, magnitudePct: shockSectorMagnitude } }), `Sector shock applied to ${shockSector}.`)}><Icon.Zap /><span>Shock Sector</span></button>
+              <SearchSelectField
+                label="Sector"
+                searchValue={shockSectorSearch}
+                searchPlaceholder="Type sector"
+                onSearchChange={handleSectorSearchChange}
+                selectValue={shockSector}
+                onSelectChange={(value) => {
+                  setShockSector(value);
+                  setShockSectorSearch(value);
+                }}
+                options={getSectorOptions(shockSectorSearch, shockSector)}
+              />
+              <div className="ap-field"><label className="ap-field__label">Magnitude (%)</label><input className="ap-input" type="text" inputMode="decimal" value={shockSectorMagnitude} onChange={(e) => handleSignedNumberChange(e.target.value, setShockSectorMagnitude)} placeholder="Type % or -%" /></div>
+              <button className="ap-btn ap-btn--warning ap-btn--full" onClick={handleSectorShock} disabled={!shockSector || shockSectorMagnitudeValue === null}><Icon.Zap /><span>Shock Sector</span></button>
             </Panel>
           </div>
 
